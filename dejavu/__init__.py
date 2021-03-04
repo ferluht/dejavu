@@ -118,6 +118,61 @@ class Dejavu:
         pool.close()
         pool.join()
 
+    def fingerprint_filelist(self, filenames: list, nprocesses: int = None) -> None:
+        """
+        Given a directory and a set of extensions it fingerprints all files that match each extension specified.
+
+        :param path: path to the directory.
+        :param extensions: list of file extensions to consider.
+        :param nprocesses: amount of processes to fingerprint the files within the directory.
+        """
+        # Try to use the maximum amount of processes if not given.
+        try:
+            nprocesses = nprocesses or multiprocessing.cpu_count()
+        except NotImplementedError:
+            nprocesses = 1
+        else:
+            nprocesses = 1 if nprocesses <= 0 else nprocesses
+
+        pool = multiprocessing.Pool(nprocesses)
+
+        filenames_to_fingerprint = []
+        for filename in filenames:
+            # don't refingerprint already fingerprinted files
+            if decoder.unique_hash(filename) in self.songhashes_set:
+                print(f"{filename} already fingerprinted, continuing...")
+                continue
+
+            filenames_to_fingerprint.append(filename)
+
+        # Prepare _fingerprint_worker input
+        worker_input = list(zip(filenames_to_fingerprint, [self.limit] * len(filenames_to_fingerprint)))
+
+        # Send off our tasks
+        iterator = pool.imap_unordered(Dejavu._fingerprint_worker, worker_input)
+
+        # Loop till we have all of them
+        while True:
+            try:
+                song_name, hashes, file_hash = next(iterator)
+            except multiprocessing.TimeoutError:
+                continue
+            except StopIteration:
+                break
+            except Exception:
+                print("Failed fingerprinting")
+                # Print traceback because we can't reraise it here
+                traceback.print_exc(file=sys.stdout)
+            else:
+                sid = self.db.insert_song(song_name, file_hash, len(hashes))
+
+                self.db.insert_hashes(sid, hashes)
+                self.db.set_song_fingerprinted(sid)
+                self.__load_fingerprinted_audio_hashes()
+
+        pool.close()
+        pool.join()
+
     def fingerprint_file(self, file_path: str, song_name: str = None) -> None:
         """
         Given a path to a file the method generates hashes for it and stores them in the database
